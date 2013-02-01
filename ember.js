@@ -150,8 +150,8 @@ Ember.deprecateFunc = function(message, func) {
 
 })();
 
-// Version: v1.0.0-pre.2-568-g8936e94
-// Last commit: 8936e94 (2013-01-30 11:46:55 -0800)
+// Version: v1.0.0-pre.2-584-g0f14b34
+// Last commit: 0f14b34 (2013-02-01 09:05:31 -0800)
 
 
 (function() {
@@ -331,14 +331,36 @@ Ember.uuid = 0;
 // LOGGER
 //
 
+function consoleMethod(name) {
+  if (imports.console && imports.console[name]) {
+    // Older IE doesn't support apply, but Chrome needs it
+    if (imports.console[name].apply) {
+      return function() {
+        imports.console[name].apply(imports.console, arguments);
+      };
+    } else {
+      return function() {
+        var message = Array.prototype.join.call(arguments, ', ');
+        imports.console[name](message);
+      };
+    }
+  }
+}
+
 /**
-  Inside Ember-Metal, simply uses the `imports.console` object.
+  Inside Ember-Metal, simply uses the methods from `imports.console`.
   Override this to provide more robust logging functionality.
 
   @class Logger
   @namespace Ember
 */
-Ember.Logger = imports.console || { log: Ember.K, warn: Ember.K, error: Ember.K, info: Ember.K, debug: Ember.K };
+Ember.Logger = {
+  log:   consoleMethod('log')   || Ember.K,
+  warn:  consoleMethod('warn')  || Ember.K,
+  error: consoleMethod('error') || Ember.K,
+  info:  consoleMethod('info')  || Ember.K,
+  debug: consoleMethod('debug') || consoleMethod('info') || Ember.K
+};
 
 
 // ..........................................................
@@ -6051,7 +6073,7 @@ define("container",
       this.resolver = parent && parent.resolver || function() {};
       this.registry = new InheritingDict(parent && parent.registry);
       this.cache = new InheritingDict(parent && parent.cache);
-      this.typeInjections = {};
+      this.typeInjections = new InheritingDict(parent && parent.typeInjections);
       this.injections = {};
       this._options = new InheritingDict(parent && parent._options);
       this._typeOptions = new InheritingDict(parent && parent._typeOptions);
@@ -6126,7 +6148,11 @@ define("container",
       typeInjection: function(type, property, fullName) {
         if (this.parent) { illegalChildOperation('typeInjection'); }
 
-        var injections = this.typeInjections[type] = this.typeInjections[type] || [];
+        var injections = this.typeInjections.get(type);
+        if (!injections) {
+          injections = [];
+          this.typeInjections.set(type, injections);
+        }
         injections.push({ property: property, fullName: fullName });
       },
 
@@ -6228,7 +6254,7 @@ define("container",
 
       if (factory) {
         var injections = [];
-        injections = injections.concat(container.typeInjections[type] || []);
+        injections = injections.concat(container.typeInjections.get(type) || []);
         injections = injections.concat(container.injections[fullName] || []);
 
         var hash = buildInjections(container, injections);
@@ -13277,11 +13303,13 @@ Ember.EventDispatcher = Ember.Object.extend(
     rootElement.delegate('[data-ember-action]', event + '.ember', function(evt) {
       return Ember.handleErrors(function() {
         var actionId = Ember.$(evt.currentTarget).attr('data-ember-action'),
-            action   = Ember.Handlebars.ActionHelper.registeredActions[actionId],
-            handler  = action.handler;
+            action   = Ember.Handlebars.ActionHelper.registeredActions[actionId];
 
-        if (action.eventName === eventName) {
-          return handler(evt);
+        // We have to check for action here since in some cases, jQuery will trigger
+        // an event on `removeChild` (i.e. focusout) after we've already torn down the
+        // action handlers for the view.
+        if (action && action.eventName === eventName) {
+          return action.handler(evt);
         }
       }, this);
     });
@@ -14902,7 +14930,7 @@ Ember.View = Ember.CoreView.extend(
     // element.
     // In the interim, we will just re-render if that happens. It is more
     // important than elements get garbage collected.
-    this.destroyElement();
+    if (!this.removedFromDOM) { this.destroyElement(); }
     this.invokeRecursively(function(view) {
       if (view.clearRenderedChildren) { view.clearRenderedChildren(); }
     });
@@ -15377,11 +15405,16 @@ Ember.View = Ember.CoreView.extend(
     // so collect any information we need before calling super.
     var childViews = this._childViews,
         parent = this._parentView,
-        childLen;
+        childLen, i;
 
     // destroy the element -- this will avoid each child view destroying
     // the element over and over again...
     if (!this.removedFromDOM) { this.destroyElement(); }
+
+    childLen = childViews.length;
+    for (i=childLen-1; i>=0; i--) {
+      childViews[i].removedFromDOM = true;
+    }
 
     // remove from non-virtual parent view if viewName was specified
     if (this.viewName) {
@@ -15399,8 +15432,7 @@ Ember.View = Ember.CoreView.extend(
     this.transitionTo('destroyed');
 
     childLen = childViews.length;
-    for (var i=childLen-1; i>=0; i--) {
-      childViews[i].removedFromDOM = true;
+    for (i=childLen-1; i>=0; i--) {
       childViews[i].destroy();
     }
 
@@ -16281,56 +16313,6 @@ var forEach = Ember.EnumerableUtils.forEach;
   </div>
   ```
 
-  Direct manipulation of `childViews` presence or absence in the DOM via calls
-  to `remove` or `removeFromParent` or calls to a container's `removeChild` may
-  not behave correctly.
-
-  Calling `remove()` on a child view will remove the view's HTML, but it will
-  remain as part of its container's `childView`s property.
-
-  Calling `removeChild()` on the container will remove the passed view instance
-  from the container's `childView`s but keep its HTML within the container's
-  rendered view.
-
-  Calling `removeFromParent()` behaves as expected but should be avoided in
-  favor of direct manipulation of a container as an array.
-
-  ```javascript
-  aContainer = Ember.ContainerView.create({
-    classNames: ['the-container'],
-    childViews: ['aView', 'bView'],
-    aView: Ember.View.create({
-      template: Ember.Handlebars.compile("A")
-    }),
-    bView: Ember.View.create({
-      template: Ember.Handlebars.compile("B")
-    })
-  });
-
-  aContainer.appendTo('body');
-  ```
-
-  Results in the HTML
-
-  ```html
-  <div class="ember-view the-container">
-    <div class="ember-view">A</div>
-    <div class="ember-view">B</div>
-  </div>
-  ```
-
-  Calling `aContainer.get('aView').removeFromParent()` will result in the
-  following HTML
-
-  ```html
-  <div class="ember-view the-container">
-    <div class="ember-view">B</div>
-  </div>
-  ```
-
-  And the `Ember.View` instance stored in `aContainer.aView` will be removed from `aContainer`'s
-  `childViews` array.
-
   ## Templates and Layout
 
   A `template`, `templateName`, `defaultTemplate`, `layout`, `layoutName` or
@@ -16465,6 +16447,11 @@ Ember.ContainerView = Ember.View.extend(Ember.MutableArray, {
       this.currentState.childViewsWillChange(this, views, start, removed);
       this.initializeViews(changedViews, null, null);
     }
+  },
+
+  removeChild: function(child) {
+    this.removeObject(child);
+    return this;
   },
 
   /**
@@ -20440,7 +20427,7 @@ Ember.TextField = Ember.View.extend(Ember.TextSupport,
 
   classNames: ['ember-text-field'],
   tagName: "input",
-  attributeBindings: ['type', 'value', 'size'],
+  attributeBindings: ['type', 'value', 'size', 'pattern'],
 
   /**
     The `value` attribute of the input element. As the user inputs text, this
@@ -20469,6 +20456,15 @@ Ember.TextField = Ember.View.extend(Ember.TextSupport,
     @default null
   */
   size: null,
+
+  /**
+    The `pattern` the pattern attribute of input element.
+
+    @property pattern
+    @type String
+    @default null
+  */
+  pattern: null,
 
   /**
     The action to be sent when the user presses the return key.
@@ -22646,7 +22642,7 @@ Ember.generateController = function(container, controllerName, context) {
 var Router = requireModule("router");
 var get = Ember.get, set = Ember.set, classify = Ember.String.classify;
 
-var DefaultView = Ember.View.extend(Ember._Metamorph);
+var DefaultView = Ember._MetamorphView;
 function setupLocation(router) {
   var location = get(router, 'location'),
       rootURL = get(router, 'rootURL');
@@ -23309,6 +23305,8 @@ function normalizeOptions(route, name, template, options) {
   options.name = name;
   options.template = template;
 
+  Ember.assert("An outlet ("+options.outlet+") was specified but this view will render at the root level.", options.outlet === 'main' || options.into);
+
   var controller = options.controller, namedController;
 
   if (options.controller) {
@@ -23967,13 +23965,12 @@ Ember.Handlebars.registerHelper('control', function(path, modelPath, options) {
 
   var normalizedPath = path.replace(/\//g, '.');
 
-  var childView = subContainer.lookup('view:' + normalizedPath),
+  var childView = subContainer.lookup('view:' + normalizedPath) || container.lookup('view:default'),
       childController = subContainer.lookup('controller:' + normalizedPath),
       childTemplate = subContainer.lookup('template:' + path);
 
   Ember.assert("Could not find controller for path: " + normalizedPath, childController);
   Ember.assert("Could not find view for path: " + normalizedPath, childView);
-  Ember.assert("Could not find template for path: " + path, childTemplate);
 
   set(childController, 'target', controller);
   set(childController, 'model', model);
@@ -26607,8 +26604,8 @@ Ember States
 
 
 })();
-// Version: v1.0.0-pre.2-568-g8936e94
-// Last commit: 8936e94 (2013-01-30 11:46:55 -0800)
+// Version: v1.0.0-pre.2-584-g0f14b34
+// Last commit: 0f14b34 (2013-02-01 09:05:31 -0800)
 
 
 (function() {
